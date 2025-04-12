@@ -10,7 +10,7 @@ const copyRedirectsPlugin = {
   name: 'copy-redirects',
   closeBundle() {
     const redirectsPath = path.resolve(import.meta.dirname, '_redirects');
-    const publicPath = path.resolve(import.meta.dirname, 'dist/public');
+    const publicPath = path.resolve(import.meta.dirname, 'dist');
     
     if (fs.existsSync(redirectsPath)) {
       fs.copyFileSync(redirectsPath, path.join(publicPath, '_redirects'));
