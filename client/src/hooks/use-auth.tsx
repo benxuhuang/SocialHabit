@@ -20,10 +20,8 @@ type AuthContextType = {
 type LoginData = Pick<InsertUser, "username" | "password">;
 
 export const AuthContext = createContext<AuthContextType | null>(null);
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { toast } = useToast();
-  
   const {
     data: user,
     error,
@@ -41,8 +39,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     onSuccess: (user: SelectUser) => {
       queryClient.setQueryData(["/api/user"], user);
       toast({
-        title: "Login successful",
-        description: `Welcome back, ${user.firstName || user.username}!`,
+        title: "Logged in successfully",
+        description: `Welcome back, ${user.displayName || user.username}!`,
       });
     },
     onError: (error: Error) => {
@@ -63,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       queryClient.setQueryData(["/api/user"], user);
       toast({
         title: "Registration successful",
-        description: `Welcome to SocialHabit, ${user.firstName || user.username}!`,
+        description: `Welcome to SocialHabit, ${user.displayName || user.username}!`,
       });
     },
     onError: (error: Error) => {
@@ -82,8 +80,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     onSuccess: () => {
       queryClient.setQueryData(["/api/user"], null);
       toast({
-        title: "Logged out",
-        description: "You have been successfully logged out.",
+        title: "Logged out successfully",
+        description: "You have been logged out of your account.",
       });
     },
     onError: (error: Error) => {

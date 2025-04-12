@@ -2,317 +2,236 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
-import { format } from "date-fns";
-import { insertHabitSchema, insertHabitCompletionSchema, insertConnectionSchema, insertInteractionSchema } from "@shared/schema";
 import { z } from "zod";
+import { insertHabitSchema, insertHabitCompletionSchema, insertFollowSchema } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Sets up /api/register, /api/login, /api/logout, /api/user
+  // Setup authentication routes
   setupAuth(app);
-  
-  // Habits routes
-  app.post("/api/habits", async (req, res, next) => {
+
+  // Habits API
+  app.get("/api/habits", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
     try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
+      const userId = req.user!.id;
+      const habits = await storage.getHabitsByUserId(userId);
       
+      // Get today's completions to mark habits as completed or not
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const completions = await storage.getHabitCompletionsByDate(userId, today);
+      const completedHabitIds = completions.map(c => c.habitId);
+      
+      // Calculate streaks for each habit
+      const habitsWithStatus = await Promise.all(habits.map(async (habit) => {
+        const streak = await storage.getHabitStreak(habit.id);
+        return {
+          ...habit,
+          isCompleted: completedHabitIds.includes(habit.id),
+          streak
+        };
+      }));
+      
+      res.json(habitsWithStatus);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch habits" });
+    }
+  });
+
+  app.post("/api/habits", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
+    try {
+      const userId = req.user!.id;
       const validatedData = insertHabitSchema.parse({
         ...req.body,
-        userId: req.user.id
+        userId
       });
       
       const habit = await storage.createHabit(validatedData);
       res.status(201).json(habit);
-    } catch (err) {
-      next(err);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ errors: error.errors });
+      }
+      res.status(500).json({ message: "Failed to create habit" });
     }
   });
-  
-  app.get("/api/habits", async (req, res, next) => {
+
+  app.delete("/api/habits/:id", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
     try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const habits = await storage.getUserHabitsWithStreaks(req.user.id);
-      res.json(habits);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.get("/api/habits/:id", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
       const habitId = parseInt(req.params.id);
-      const habit = await storage.getHabit(habitId);
+      const userId = req.user!.id;
       
-      if (!habit) return res.status(404).json({ message: "Habit not found" });
-      if (habit.userId !== req.user.id) return res.sendStatus(403);
-      
-      const streak = await storage.getHabitStreak(habitId);
-      const longestStreak = await storage.getHabitLongestStreak(habitId);
-      const completions = await storage.getCompletionsForHabit(habitId);
-      
-      res.json({
-        ...habit,
-        streak,
-        longestStreak,
-        completions
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.put("/api/habits/:id", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const habitId = parseInt(req.params.id);
-      const habit = await storage.getHabit(habitId);
-      
-      if (!habit) return res.status(404).json({ message: "Habit not found" });
-      if (habit.userId !== req.user.id) return res.sendStatus(403);
-      
-      const validatedData = insertHabitSchema
-        .omit({ userId: true })
-        .partial()
-        .parse(req.body);
-      
-      const updatedHabit = await storage.updateHabit(habitId, validatedData);
-      res.json(updatedHabit);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.delete("/api/habits/:id", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const habitId = parseInt(req.params.id);
-      const habit = await storage.getHabit(habitId);
-      
-      if (!habit) return res.status(404).json({ message: "Habit not found" });
-      if (habit.userId !== req.user.id) return res.sendStatus(403);
+      // Check if habit belongs to user
+      const habit = await storage.getHabitById(habitId);
+      if (!habit || habit.userId !== userId) {
+        return res.status(404).json({ message: "Habit not found" });
+      }
       
       await storage.deleteHabit(habitId);
-      res.sendStatus(204);
-    } catch (err) {
-      next(err);
+      res.status(200).json({ message: "Habit deleted successfully" });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete habit" });
     }
   });
-  
-  // Habit completions routes
-  app.post("/api/habits/:id/complete", async (req, res, next) => {
+
+  // Habit Completions API
+  app.post("/api/habit-completions", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
     try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const habitId = parseInt(req.params.id);
-      const habit = await storage.getHabit(habitId);
-      
-      if (!habit) return res.status(404).json({ message: "Habit not found" });
-      if (habit.userId !== req.user.id) return res.sendStatus(403);
-      
-      // Default to today if no date provided
-      const date = req.body.date || format(new Date(), 'yyyy-MM-dd');
-      
+      const userId = req.user!.id;
       const validatedData = insertHabitCompletionSchema.parse({
-        habitId,
-        userId: req.user.id,
-        date
+        ...req.body,
+        userId
       });
       
-      const completion = await storage.completeHabit(validatedData);
+      // Check if habit belongs to user
+      const habit = await storage.getHabitById(validatedData.habitId);
+      if (!habit || habit.userId !== userId) {
+        return res.status(404).json({ message: "Habit not found" });
+      }
       
-      // Get updated streak
-      const streak = await storage.getHabitStreak(habitId);
-      
-      res.status(201).json({ 
-        ...completion,
-        streak
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.delete("/api/habits/:id/complete", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const habitId = parseInt(req.params.id);
-      const habit = await storage.getHabit(habitId);
-      
-      if (!habit) return res.status(404).json({ message: "Habit not found" });
-      if (habit.userId !== req.user.id) return res.sendStatus(403);
-      
-      // Default to today if no date provided
-      const date = req.query.date as string || format(new Date(), 'yyyy-MM-dd');
-      
-      await storage.uncompleteHabit(habitId, date);
-      res.sendStatus(204);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  // Social routes
-  app.get("/api/users", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      // Get all users except current user, don't expose passwords
-      const users = Array.from(await storage["users"].values())
-        .filter(user => user.id !== req.user.id)
-        .map(({ password, ...user }) => user);
-      
-      res.json(users);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.post("/api/follow", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const validatedData = insertConnectionSchema.parse({
-        followerId: req.user.id,
-        followingId: req.body.followingId
-      });
-      
-      const connection = await storage.followUser(validatedData);
-      res.status(201).json(connection);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.delete("/api/follow/:id", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const followingId = parseInt(req.params.id);
-      await storage.unfollowUser(req.user.id, followingId);
-      res.sendStatus(204);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.get("/api/following", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const following = await storage.getFollowing(req.user.id);
-      res.json(following.map(({ password, ...user }) => user));
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.get("/api/followers", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const followers = await storage.getFollowers(req.user.id);
-      res.json(followers.map(({ password, ...user }) => user));
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  // Activity feed
-  app.get("/api/feed", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
-      const feed = await storage.getFriendActivityFeed(req.user.id, limit);
-      
-      // Remove passwords from users
-      const sanitizedFeed = feed.map(item => ({
-        ...item,
-        user: {
-          ...item.user,
-          password: undefined
-        }
-      }));
-      
-      res.json(sanitizedFeed);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  // Support interactions
-  app.post("/api/support", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const validatedData = insertInteractionSchema.parse({
-        fromUserId: req.user.id,
-        toCompletionId: req.body.completionId,
-        type: "support"
-      });
-      
-      const interaction = await storage.supportCompletion(validatedData);
-      res.status(201).json(interaction);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  app.delete("/api/support/:id", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const completionId = parseInt(req.params.id);
-      await storage.unsupportCompletion(req.user.id, completionId);
-      res.sendStatus(204);
-    } catch (err) {
-      next(err);
-    }
-  });
-  
-  // Stats
-  app.get("/api/stats", async (req, res, next) => {
-    try {
-      if (!req.isAuthenticated()) return res.sendStatus(401);
-      
-      const days = req.query.days ? parseInt(req.query.days as string) : 7;
-      
-      // Get weekly completion rate
-      const completionRate = await storage.getUserCompletionRate(req.user.id, days);
-      
-      // Get all habits with streaks
-      const habitsWithStreaks = await storage.getUserHabitsWithStreaks(req.user.id);
-      
-      // Find habit with longest streak
-      const longestStreakHabit = habitsWithStreaks.reduce(
-        (longest, habit) => habit.longestStreak > longest.longestStreak ? habit : longest,
-        { longestStreak: 0 }
+      // Check if already completed today
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const existingCompletion = await storage.getHabitCompletionByDate(
+        validatedData.habitId,
+        userId,
+        today
       );
       
-      // Count active habits
-      const activeCount = habitsWithStreaks.filter(h => h.active).length;
-      const pausedCount = habitsWithStreaks.filter(h => !h.active).length;
-      
-      res.json({
-        completionRate,
-        longestStreakHabit,
-        habitCounts: {
-          active: activeCount,
-          paused: pausedCount,
-          total: habitsWithStreaks.length
-        }
-      });
-    } catch (err) {
-      next(err);
+      if (existingCompletion) {
+        // If already completed, delete the completion (toggle functionality)
+        await storage.deleteHabitCompletion(existingCompletion.id);
+        res.status(200).json({ message: "Habit completion removed", completed: false });
+      } else {
+        // Otherwise, add a new completion
+        const completion = await storage.createHabitCompletion(validatedData);
+        const streak = await storage.getHabitStreak(validatedData.habitId);
+        res.status(201).json({ 
+          ...completion,
+          streak,
+          completed: true
+        });
+      }
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ errors: error.errors });
+      }
+      res.status(500).json({ message: "Failed to update habit completion" });
     }
   });
-  
-  // Create an HTTP server
+
+  // User Stats API
+  app.get("/api/user-stats", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
+    try {
+      const userId = req.user!.id;
+      
+      // Get the longest streak across all habits
+      const currentStreak = await storage.getUserCurrentStreak(userId);
+      
+      // Get today's completion rate
+      const habits = await storage.getHabitsByUserId(userId);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const completions = await storage.getHabitCompletionsByDate(userId, today);
+      
+      const todayTotal = habits.length;
+      const todayCompleted = completions.length;
+      const todayCompletionRate = todayTotal > 0 ? (todayCompleted / todayTotal) * 100 : 0;
+      
+      // Get monthly completion rate
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+      
+      const monthlyCompletions = await storage.getMonthlyCompletionRate(userId);
+      
+      res.json({
+        currentStreak,
+        todayCompletionRate,
+        todayCompleted,
+        todayTotal,
+        monthlyCompletionRate: monthlyCompletions.rate,
+        monthlyCompletedDays: monthlyCompletions.completedDays,
+        monthlyTotalDays: monthlyCompletions.totalDays
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch user stats" });
+    }
+  });
+
+  // Community Feed API
+  app.get("/api/activity-feed", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
+    try {
+      const userId = req.user!.id;
+      const activities = await storage.getActivityFeed(userId);
+      res.json(activities);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch activity feed" });
+    }
+  });
+
+  // Follow User API
+  app.post("/api/follows", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
+    try {
+      const followerId = req.user!.id;
+      const validatedData = insertFollowSchema.parse({
+        ...req.body,
+        followerId
+      });
+      
+      // Check if already following
+      const existingFollow = await storage.getFollowByUserIds(
+        validatedData.followerId,
+        validatedData.followingId
+      );
+      
+      if (existingFollow) {
+        return res.status(400).json({ message: "Already following this user" });
+      }
+      
+      const follow = await storage.createFollow(validatedData);
+      res.status(201).json(follow);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ errors: error.errors });
+      }
+      res.status(500).json({ message: "Failed to follow user" });
+    }
+  });
+
+  app.delete("/api/follows/:id", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    
+    try {
+      const followerId = req.user!.id;
+      const followingId = parseInt(req.params.id);
+      
+      const follow = await storage.getFollowByUserIds(followerId, followingId);
+      if (!follow) {
+        return res.status(404).json({ message: "Follow relationship not found" });
+      }
+      
+      await storage.deleteFollow(follow.id);
+      res.status(200).json({ message: "Unfollowed successfully" });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to unfollow user" });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
